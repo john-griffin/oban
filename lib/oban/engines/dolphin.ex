@@ -111,18 +111,20 @@ defmodule Oban.Engines.Dolphin do
         # MySQL doesn't support selecting in an update. To accomplish the required functionality
         # we have to select, then update.
         if Enum.any?(jobs) do
-          ids = Enum.map_join(jobs, ",", & &1.id)
+          ids = Enum.map(jobs, & &1.id)
 
-          # The MySQL planner may choose a full table scan when the ids cover much of the table.
-          # That scan locks rows the update doesn't touch, including uncommitted inserts, and
-          # deadlocks with them. Ecto doesn't apply index hints to updates, so this is literal SQL.
+          # MySQL may scan the whole table when the ids cover most of it, which locks uncommitted
+          # inserts and deadlocks. Ecto can't add index hints to updates, so this is literal SQL.
           update = """
           UPDATE oban_jobs FORCE INDEX (PRIMARY)
+          JOIN JSON_TABLE(?, '$[*]' COLUMNS (id BIGINT PATH '$')) AS fetched
+          ON fetched.id = oban_jobs.id
           SET state = 'executing', attempted_at = ?, attempted_by = ?, attempt = attempt + 1
-          WHERE id IN (#{ids})
           """
 
-          Repo.query!(conf, update, [at, Oban.JSON.encode!(by)])
+          params = [Oban.JSON.encode!(ids), at, Oban.JSON.encode!(by)]
+
+          Repo.query!(conf, update, params, cache_statement: "oban_fetch_jobs")
         end
 
         Enum.map(
